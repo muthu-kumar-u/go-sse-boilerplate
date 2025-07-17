@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>SSE Face Log Test</title>
+    <style>
+      #output {
+        background: #f5f5f5;
+        padding: 10px;
+        border-radius: 4px;
+        font-family: monospace;
+        white-space: pre-wrap;
+        max-height: 400px;
+        overflow-y: auto;
+      }
+      button {
+        padding: 8px 16px;
+        margin: 5px;
+        background: #4caf50;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      button:disabled {
+        background: #cccccc;
+      }
+      #stopBtn {
+        background: #f44336;
+      }
+      .container {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Face Log Upload + SSE Test</h1>
+      <input type="file" id="imageInput" accept="image/*" />
+      <button id="startBtn">Start SSE & Upload</button>
+      <button id="stopBtn" disabled>Stop Connection</button>
+      <div id="output"></div>
+    </div>
+
+    <script type="module">
+      import { fetchEventSource } from "https://cdn.skypack.dev/@microsoft/fetch-event-source";
+
+      const token = "your_token_here";
+      let controller = null;
+      let currentStreamId = null;
+      let isConnectionActive = false;
+
+      document.addEventListener("DOMContentLoaded", () => {
+        const startBtn = document.getElementById("startBtn");
+        const stopBtn = document.getElementById("stopBtn");
+
+        startBtn.addEventListener("click", startSSE);
+        stopBtn.addEventListener("click", stopSSE);
+      });
+
+      function generateStreamId() {
+        return "facelog-" + Math.random().toString(36).substring(2, 15);
+      }
+
+      function stopSSE() {
+        if (controller) {
+          log("🛑 Manually stopping SSE connection...");
+          controller.abort();
+          cleanupConnection();
+        }
+      }
+
+      function cleanupConnection() {
+        if (controller) {
+          controller = null;
+        }
+        currentStreamId = null;
+        isConnectionActive = false;
+        document.getElementById("stopBtn").disabled = true;
+        document.getElementById("startBtn").disabled = false;
+      }
+
+      async function startSSE() {
+        if (isConnectionActive) {
+          log("⚠️ Connection already active");
+          return;
+        }
+
+        const fileInput = document.getElementById("imageInput");
+        const file = fileInput.files[0];
+
+        if (!file) {
+          alert("Please select an image first.");
+          return;
+        }
+
+        // Setup UI state
+        isConnectionActive = true;
+        document.getElementById("startBtn").disabled = true;
+        document.getElementById("stopBtn").disabled = false;
+        currentStreamId = generateStreamId();
+        controller = new AbortController();
+
+        const formData = new FormData();
+        formData.append("image", file);
+
+        log(`🔌 Connecting to SSE with stream ID: ${currentStreamId}`);
+
+        try {
+          await fetchEventSource(
+            `http://localhost:8082/api/v1/facelog?stream=${currentStreamId}`,
+            {
+              method: "GET",
+              headers: {
+                Authorization: `Bearer ${token}`,
+                Accept: "text/event-stream",
+              },
+              signal: controller.signal,
+              openWhenHidden: false, // Prevent reconnection when tab is hidden
+
+              onopen(response) {
+                if (response.ok) {
+                  log("✅ SSE connection established");
+                  uploadImage(formData);
+                } else {
+                  throw new Error(`Server returned ${response.status}`);
+                }
+              },
+
+              onmessage(msg) {
+                try {
+                  // Handle empty messages (heartbeats)
+                  if (!msg.data.trim()) {
+                    return;
+                  }
+
+                  const data = JSON.parse(msg.data);
+                  log(
+                    `📡 [${msg.event || "message"}]: ${JSON.stringify(
+                      data,
+                      null,
+                      2
+                    )}`
+                  );
+
+                  if (data.event === "done") {
+                    log("🏁 Process completed successfully");
+                    stopSSE(); // Auto-close on completion
+                  }
+                } catch (e) {
+                  log(`⚠️ Could not parse message: ${msg.data}`);
+                }
+              },
+
+              onclose() {
+                log("🚪 Connection closed by server");
+                cleanupConnection();
+              },
+
+              onerror(err) {
+                log(`❌ Error: ${err.message}`);
+                cleanupConnection();
+                // Don't throw error to prevent retries
+              },
+            }
+          );
+        } catch (err) {
+          log(`💥 SSE failed: ${err.message}`);
+          cleanupConnection();
+        }
+      }
+
+      async function uploadImage(formData) {
+        if (!currentStreamId) {
+          log("⚠️ No active stream ID for upload");
+          return;
+        }
+
+        log(`🔼 Starting upload to stream: ${currentStreamId}`);
+
+        try {
+          const response = await fetch(
+            `http://localhost:8082/api/v1/facelog/upload?stream=${currentStreamId}`,
+            {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+              body: formData,
+            }
+          );
+
+          if (!response.ok) {
+            const error = await response.text();
+            throw new Error(`Upload failed: ${response.status} - ${error}`);
+          }
+
+          const data = await response.json();
+          log(`✅ Upload successful: ${JSON.stringify(data, null, 2)}`);
+        } catch (err) {
+          log(`❌ Upload failed: ${err.message}`);
+          stopSSE();
+        }
+      }
+
+      function log(message) {
+        const output = document.getElementById("output");
+        const entry = document.createElement("div");
+        entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+        output.appendChild(entry);
+        output.scrollTop = output.scrollHeight;
+      }
+    </script>
+  </body>
+</html>
