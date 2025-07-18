@@ -82,7 +82,7 @@ func (h *StreamHandler) LogUserFace(c *gin.Context) {
 	}
 
 	sendEvent(&appschema.EventMessage{
-		Code:       202,
+		Code:       http.StatusAccepted,
 		Event:      faceanalyze_events.EventProcessingImage,
 		Message:    "Processing image",
 		Completion: 25,
@@ -95,7 +95,7 @@ func (h *StreamHandler) LogUserFace(c *gin.Context) {
 	}
 
 	sendEvent(&appschema.EventMessage{
-		Code:       202,
+		Code:       http.StatusAccepted,
 		Event:      faceanalyze_events.EventAnalyzingFace,
 		Message:    "Analyzing face",
 		Completion: 50,
@@ -250,7 +250,7 @@ func (h *StreamHandler) LogUserFaceLambda(ctx context.Context, req events.Lambda
 	reader, writer := io.Pipe()
 	done := make(chan struct{})
 
-	go func() {
+	go func ()  {
 		defer func() {
 			writer.Close()
 			close(done)
@@ -268,14 +268,34 @@ func (h *StreamHandler) LogUserFaceLambda(ctx context.Context, req events.Lambda
 			globals.Stream.Publish(streamId, []byte(payload))
 		}
 
-		sendEvent(&appschema.EventMessage{Code: 200,Event: "ready",Message: "Stream initialized", StreamID: streamId,Completion: 0,})
-		sendEvent(&appschema.EventMessage{Code: 202,Event: faceanalyze_events.EventProcessingImage, Message: "Starting processing", Completion: 10})
+		authHeader := req.Headers["Authorization"]
+		if authHeader == "" {
+			authHeader = req.Headers["authorization"]
+		}
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+			sendEvent(&appschema.EventMessage{Code: http.StatusUnauthorized,Event: faceanalyze_events.EventError,Message: "Missing or invalid Authorization header"})
+			return
+		}
+
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		verified, err := h.UserService.IsUserAuthenticated(ctx, tokenString)
+		if err != nil {
+			sendEvent(&appschema.EventMessage{Code: http.StatusInternalServerError,Event: faceanalyze_events.EventError,Message: "Authentication failed"})
+			return
+		}
+		if !verified {
+			sendEvent(&appschema.EventMessage{Code: http.StatusUnauthorized,Event: faceanalyze_events.EventError, Message: "User not allowed"})
+			return
+		}
+
+		sendEvent(&appschema.EventMessage{Code: http.StatusOK,Event: faceanalyze_events.EventReady,Message: "Stream initialized", StreamID: streamId,Completion: 0,})
+		sendEvent(&appschema.EventMessage{Code: http.StatusAccepted,Event: faceanalyze_events.EventProcessingImage, Message: "Starting processing", Completion: 10})
 
 		bodyBytes := []byte(req.Body)
 		if req.IsBase64Encoded {
 			decoded, err := base64.StdEncoding.DecodeString(req.Body)
 			if err != nil {
-				sendEvent(&appschema.EventMessage{Code: 400, Event: faceanalyze_events.EventError, Message: "Invalid base64"})
+				sendEvent(&appschema.EventMessage{Code: http.StatusBadRequest, Event: faceanalyze_events.EventError, Message: "Invalid base64"})
 				return
 			}
 			bodyBytes = decoded
@@ -287,7 +307,7 @@ func (h *StreamHandler) LogUserFaceLambda(ctx context.Context, req events.Lambda
 		}
 		boundary := extractBoundary(contentType)
 		if boundary == "" {
-			sendEvent(&appschema.EventMessage{Code: 400, Event: faceanalyze_events.EventError, Message: "Missing multipart boundary"})
+			sendEvent(&appschema.EventMessage{Code: http.StatusBadRequest, Event: faceanalyze_events.EventError, Message: "Missing multipart boundary"})
 			return
 		}
 
@@ -301,14 +321,14 @@ func (h *StreamHandler) LogUserFaceLambda(ctx context.Context, req events.Lambda
 				break
 			}
 			if err != nil {
-				sendEvent(&appschema.EventMessage{Code: 400, Event: faceanalyze_events.EventError, Message: "Read error in multipart"})
+				sendEvent(&appschema.EventMessage{Code: http.StatusBadRequest, Event: faceanalyze_events.EventError, Message: "Read error in multipart"})
 				return
 			}
 			if part.FormName() == "image" {
 				fileName = part.FileName()
 				fileData, err = io.ReadAll(part)
 				if err != nil {
-					sendEvent(&appschema.EventMessage{Code: 400, Event: faceanalyze_events.EventError, Message: "Failed to read image data"})
+					sendEvent(&appschema.EventMessage{Code: http.StatusBadRequest, Event: faceanalyze_events.EventError, Message: "Failed to read image data"})
 					return
 				}
 				break
@@ -316,23 +336,23 @@ func (h *StreamHandler) LogUserFaceLambda(ctx context.Context, req events.Lambda
 		}
 
 		if len(fileData) == 0 {
-			sendEvent(&appschema.EventMessage{Code: 400, Event: faceanalyze_events.EventError, Message: "No image found"})
+			sendEvent(&appschema.EventMessage{Code: http.StatusBadRequest, Event: faceanalyze_events.EventError, Message: "No image found"})
 			return
 		}
 
 		ext := strings.ToLower(filepath.Ext(fileName))
 		if !slices.Contains(constants.IMAGE_EXTENSIONS, ext) {
-			sendEvent(&appschema.EventMessage{Code: 400, Event: faceanalyze_events.EventError, Message: "Unsupported file extension"})
+			sendEvent(&appschema.EventMessage{Code: http.StatusBadRequest, Event: faceanalyze_events.EventError, Message: "Unsupported file extension"})
 			return
 		}
 
-		sendEvent(&appschema.EventMessage{Code: 202,Event: faceanalyze_events.EventAnalyzingFace,Message: "Analyzing face",Completion: 50})
+		sendEvent(&appschema.EventMessage{Code: http.StatusAccepted,Event: faceanalyze_events.EventAnalyzingFace,Message: "Analyzing face",Completion: 50})
 
 		body := &bytes.Buffer{}
 		mpWriter := multipart.NewWriter(body)
 		part, err := mpWriter.CreateFormFile(constants.FACE_ANALYZE_PAYLOAD_FIELD_NAME, fileName)
 		if err != nil {
-			sendEvent(&appschema.EventMessage{Code: 500, Event: faceanalyze_events.EventError, Message: "Failed to prepare image for scan"})
+			sendEvent(&appschema.EventMessage{Code: http.StatusInternalServerError, Event: faceanalyze_events.EventError, Message: "Failed to prepare image for scan"})
 			return
 		}
 		part.Write(fileData)
@@ -341,7 +361,7 @@ func (h *StreamHandler) LogUserFaceLambda(ctx context.Context, req events.Lambda
 		reqUrl := fmt.Sprintf("%s/%s", globals.FaceAnalyzeService.URL, constants.FACE_ANALYZE_SERVICE_PATHS[0])
 		faceReq, err := http.NewRequest(http.MethodPost, reqUrl, body)
 		if err != nil {
-			sendEvent(&appschema.EventMessage{Code: 500, Event: faceanalyze_events.EventError, Message: "Request creation failed"})
+			sendEvent(&appschema.EventMessage{Code: http.StatusInternalServerError, Event: faceanalyze_events.EventError, Message: "Request creation failed"})
 			return
 		}
 		faceReq.Header.Set("Authorization", os.Getenv("FACEANALYZE_SERVICE_AUTH_API_KEY"))
@@ -349,7 +369,7 @@ func (h *StreamHandler) LogUserFaceLambda(ctx context.Context, req events.Lambda
 
 		resp, err := globals.FaceAnalyzeService.Client.Do(faceReq)
 		if err != nil {
-			sendEvent(&appschema.EventMessage{Code: 500, Event: faceanalyze_events.EventError, Message: "Face analyze call failed"})
+			sendEvent(&appschema.EventMessage{Code: http.StatusInternalServerError, Event: faceanalyze_events.EventError, Message: "Face analyze call failed"})
 			return
 		}
 		defer resp.Body.Close()
@@ -357,17 +377,17 @@ func (h *StreamHandler) LogUserFaceLambda(ctx context.Context, req events.Lambda
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(resp.Body)
 			log.Printf("Scan failed: %s", string(body))
-			sendEvent(&appschema.EventMessage{Code: 500, Event: faceanalyze_events.EventError, Message: "Face scan error"})
+			sendEvent(&appschema.EventMessage{Code: http.StatusInternalServerError, Event: faceanalyze_events.EventError, Message: "Face scan error"})
 			return
 		}
 
 		var faResp appschema.FaceScannerResponse
 		if err := utils.BindHttpResponseToStruct(resp, &faResp); err != nil {
-			sendEvent(&appschema.EventMessage{Code: 500, Event: faceanalyze_events.EventError, Message: "Failed to parse scan response"})
+			sendEvent(&appschema.EventMessage{Code: http.StatusInternalServerError, Event: faceanalyze_events.EventError, Message: "Failed to parse scan response"})
 			return
 		}
 
-		sendEvent(&appschema.EventMessage{Code: 200,Event: faceanalyze_events.EventCompleted,Message: "Scan complete",Completion: 100,Data: &appschema.FaceScanData{Quantitative: faResp.Data.Quantitative, Qualitative: faResp.Data.Qualitative},})
+		sendEvent(&appschema.EventMessage{Code: http.StatusOK,Event: faceanalyze_events.EventCompleted,Message: "Scan complete",Completion: 100,Data: &appschema.FaceScanData{Quantitative: faResp.Data.Quantitative, Qualitative: faResp.Data.Qualitative},})
 	}()
 
 	// heartbeat loop & client disconnect watch
@@ -399,7 +419,6 @@ func (h *StreamHandler) LogUserFaceLambda(ctx context.Context, req events.Lambda
 		Body: reader,
 	}, nil
 }
-
 
 func extractBoundary(contentType string) string {
     parts := strings.Split(contentType, ";")
