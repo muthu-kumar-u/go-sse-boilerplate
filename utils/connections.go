@@ -7,8 +7,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/nelsonin-research-org/clenz-stream/globals"
-	appschema "github.com/nelsonin-research-org/clenz-stream/models"
+	"github.com/muthu-kumar-u/go-sse/globals"
+	appschema "github.com/muthu-kumar-u/go-sse/models"
 )
 
 // CreateHttpClients initializes HTTP clients for the microservices with connection pool management.

@@ -7,7 +7,7 @@ import (
 	"mime/multipart"
 
 	"github.com/gin-gonic/gin"
-	appschema "github.com/nelsonin-research-org/clenz-stream/models"
+	appschema "github.com/muthu-kumar-u/go-sse/models"
 )
 
 func GetUserIdFromHeader(c *gin.Context) (string, error) {

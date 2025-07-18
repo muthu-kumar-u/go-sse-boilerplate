@@ -1,11 +1,14 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,13 +16,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-lambda-go/events"
 	"github.com/gin-gonic/gin"
-	constants "github.com/nelsonin-research-org/clenz-stream/const"
-	faceanalyze_events "github.com/nelsonin-research-org/clenz-stream/events/faceAnalyze"
-	"github.com/nelsonin-research-org/clenz-stream/globals"
-	appschema "github.com/nelsonin-research-org/clenz-stream/models"
-	"github.com/nelsonin-research-org/clenz-stream/services"
-	"github.com/nelsonin-research-org/clenz-stream/utils"
+	"github.com/google/uuid"
+	constants "github.com/muthu-kumar-u/go-sse/const"
+	faceanalyze_events "github.com/muthu-kumar-u/go-sse/events/faceAnalyze"
+	"github.com/muthu-kumar-u/go-sse/globals"
+	appschema "github.com/muthu-kumar-u/go-sse/models"
+	"github.com/muthu-kumar-u/go-sse/services"
+	"github.com/muthu-kumar-u/go-sse/utils"
 )
 
 type StreamHandler struct {
@@ -40,16 +45,14 @@ func (h *StreamHandler) LogUserFace(c *gin.Context) {
 	}
 
 	sendEvent := func(event *appschema.EventMessage) {
-		data, err := json.Marshal(event)
-		if err != nil {
-			log.Printf("marshal error: %v", err)
-			return
-		}
-		payload := fmt.Sprintf("event: %s\ndata: %s\n\n", event.Event, data)
-		if !globals.Stream.Publish(streamId, []byte(payload)) {
-			fmt.Printf("[SSE] ⚠️ No subscribers for stream %s\n", streamId)
-		}
-	}
+        data, err := json.Marshal(event)
+        if err != nil {
+            log.Printf("marshal error: %v", err)
+            return
+        }
+        payload := fmt.Sprintf("event: %s\ndata: %s\n\n", event.Event, data)
+        globals.Stream.Publish(streamId, []byte(payload))
+    }
 
 	// Parse multipart form
 	if err := c.Request.ParseMultipartForm(10 << 20); err != nil {
@@ -238,4 +241,173 @@ func (h *StreamHandler) FaceLogStream(c *gin.Context) {
             flusher.Flush()
         }
     }
+}
+
+func (h *StreamHandler) LogUserFaceLambda(ctx context.Context, req events.LambdaFunctionURLRequest) (*events.LambdaFunctionURLStreamingResponse, error) {
+	streamId := uuid.NewString()
+	go globals.Stream.CreateTemporaryStream(streamId, 2*time.Minute) // create temporary stream
+
+	reader, writer := io.Pipe()
+	done := make(chan struct{})
+
+	go func() {
+		defer func() {
+			writer.Close()
+			close(done)
+			log.Printf("Stream completed or client disconnected for: %s", streamId)
+		}()
+
+		sendEvent := func(event *appschema.EventMessage) {
+			data, err := json.Marshal(event)
+			if err != nil {
+				log.Printf("Marshal error: %v", err)
+				return
+			}
+			payload := fmt.Sprintf("event: %s\ndata: %s\n\n", event.Event, data)
+			writer.Write([]byte(payload))
+			globals.Stream.Publish(streamId, []byte(payload))
+		}
+
+		sendEvent(&appschema.EventMessage{Code: 200,Event: "ready",Message: "Stream initialized", StreamID: streamId,Completion: 0,})
+		sendEvent(&appschema.EventMessage{Code: 202,Event: faceanalyze_events.EventProcessingImage, Message: "Starting processing", Completion: 10})
+
+		bodyBytes := []byte(req.Body)
+		if req.IsBase64Encoded {
+			decoded, err := base64.StdEncoding.DecodeString(req.Body)
+			if err != nil {
+				sendEvent(&appschema.EventMessage{Code: 400, Event: faceanalyze_events.EventError, Message: "Invalid base64"})
+				return
+			}
+			bodyBytes = decoded
+		}
+
+		contentType := req.Headers["content-type"]
+		if contentType == "" {
+			contentType = req.Headers["Content-Type"]
+		}
+		boundary := extractBoundary(contentType)
+		if boundary == "" {
+			sendEvent(&appschema.EventMessage{Code: 400, Event: faceanalyze_events.EventError, Message: "Missing multipart boundary"})
+			return
+		}
+
+		mr := multipart.NewReader(bytes.NewReader(bodyBytes), boundary)
+		var fileData []byte
+		var fileName string
+
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				sendEvent(&appschema.EventMessage{Code: 400, Event: faceanalyze_events.EventError, Message: "Read error in multipart"})
+				return
+			}
+			if part.FormName() == "image" {
+				fileName = part.FileName()
+				fileData, err = io.ReadAll(part)
+				if err != nil {
+					sendEvent(&appschema.EventMessage{Code: 400, Event: faceanalyze_events.EventError, Message: "Failed to read image data"})
+					return
+				}
+				break
+			}
+		}
+
+		if len(fileData) == 0 {
+			sendEvent(&appschema.EventMessage{Code: 400, Event: faceanalyze_events.EventError, Message: "No image found"})
+			return
+		}
+
+		ext := strings.ToLower(filepath.Ext(fileName))
+		if !slices.Contains(constants.IMAGE_EXTENSIONS, ext) {
+			sendEvent(&appschema.EventMessage{Code: 400, Event: faceanalyze_events.EventError, Message: "Unsupported file extension"})
+			return
+		}
+
+		sendEvent(&appschema.EventMessage{Code: 202,Event: faceanalyze_events.EventAnalyzingFace,Message: "Analyzing face",Completion: 50})
+
+		body := &bytes.Buffer{}
+		mpWriter := multipart.NewWriter(body)
+		part, err := mpWriter.CreateFormFile(constants.FACE_ANALYZE_PAYLOAD_FIELD_NAME, fileName)
+		if err != nil {
+			sendEvent(&appschema.EventMessage{Code: 500, Event: faceanalyze_events.EventError, Message: "Failed to prepare image for scan"})
+			return
+		}
+		part.Write(fileData)
+		mpWriter.Close()
+
+		reqUrl := fmt.Sprintf("%s/%s", globals.FaceAnalyzeService.URL, constants.FACE_ANALYZE_SERVICE_PATHS[0])
+		faceReq, err := http.NewRequest(http.MethodPost, reqUrl, body)
+		if err != nil {
+			sendEvent(&appschema.EventMessage{Code: 500, Event: faceanalyze_events.EventError, Message: "Request creation failed"})
+			return
+		}
+		faceReq.Header.Set("Authorization", os.Getenv("FACEANALYZE_SERVICE_AUTH_API_KEY"))
+		faceReq.Header.Set("Content-Type", mpWriter.FormDataContentType())
+
+		resp, err := globals.FaceAnalyzeService.Client.Do(faceReq)
+		if err != nil {
+			sendEvent(&appschema.EventMessage{Code: 500, Event: faceanalyze_events.EventError, Message: "Face analyze call failed"})
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			log.Printf("Scan failed: %s", string(body))
+			sendEvent(&appschema.EventMessage{Code: 500, Event: faceanalyze_events.EventError, Message: "Face scan error"})
+			return
+		}
+
+		var faResp appschema.FaceScannerResponse
+		if err := utils.BindHttpResponseToStruct(resp, &faResp); err != nil {
+			sendEvent(&appschema.EventMessage{Code: 500, Event: faceanalyze_events.EventError, Message: "Failed to parse scan response"})
+			return
+		}
+
+		sendEvent(&appschema.EventMessage{Code: 200,Event: faceanalyze_events.EventCompleted,Message: "Scan complete",Completion: 100,Data: &appschema.FaceScanData{Quantitative: faResp.Data.Quantitative, Qualitative: faResp.Data.Qualitative},})
+	}()
+
+	// heartbeat loop & client disconnect watch
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Printf("[⚠️] Client manually disconnected from stream: %s", streamId)
+				return
+			case <-done:
+				return
+			case <-ticker.C:
+				writer.Write([]byte(": heartbeat\n\n"))
+			}
+		}
+	}()
+
+	return &events.LambdaFunctionURLStreamingResponse{
+		StatusCode: http.StatusOK,
+		Headers: map[string]string{
+			"Content-Type":                "text/event-stream",
+			"Cache-Control":               "no-cache",
+			"Connection":                  "keep-alive",
+			"Access-Control-Allow-Origin": "*",
+		},
+		Body: reader,
+	}, nil
+}
+
+
+func extractBoundary(contentType string) string {
+    parts := strings.Split(contentType, ";")
+    for _, part := range parts {
+        part = strings.TrimSpace(part)
+        if strings.HasPrefix(part, "boundary=") {
+            return strings.Trim(strings.TrimPrefix(part, "boundary="), `"`)
+        }
+    }
+    return ""
 }

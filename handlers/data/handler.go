@@ -1,10 +1,10 @@
 package handlers
 
 import (
-	userController "github.com/nelsonin-research-org/clenz-stream/controller/user"
-	"github.com/nelsonin-research-org/clenz-stream/globals"
-	"github.com/nelsonin-research-org/clenz-stream/handlers"
-	"github.com/nelsonin-research-org/clenz-stream/services"
+	userController "github.com/muthu-kumar-u/go-sse/controller/user"
+	"github.com/muthu-kumar-u/go-sse/globals"
+	"github.com/muthu-kumar-u/go-sse/handlers"
+	"github.com/muthu-kumar-u/go-sse/services"
 )
 
 type AppHandlers struct {

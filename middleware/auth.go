@@ -2,7 +2,7 @@ package middleware
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/nelsonin-research-org/clenz-stream/services"
+	"github.com/muthu-kumar-u/go-sse/services"
 )
 
 func AuthMiddleware(userService services.UserService) gin.HandlerFunc {

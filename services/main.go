@@ -3,7 +3,7 @@ package services
 import (
 	"context"
 
-	controller "github.com/nelsonin-research-org/clenz-stream/controller/user"
+	controller "github.com/muthu-kumar-u/go-sse/controller/user"
 )
 
 type UserService interface {

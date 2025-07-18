@@ -3,96 +3,24 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	ginadapter "github.com/awslabs/aws-lambda-go-api-proxy/gin"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
-	"github.com/nelsonin-research-org/clenz-stream/events/stream"
-	"github.com/nelsonin-research-org/clenz-stream/globals"
-	"github.com/nelsonin-research-org/clenz-stream/handlers"
-	app "github.com/nelsonin-research-org/clenz-stream/handlers/data"
-	"github.com/nelsonin-research-org/clenz-stream/middleware"
-	"github.com/nelsonin-research-org/clenz-stream/utils"
+	"github.com/muthu-kumar-u/go-sse/events/stream"
+	"github.com/muthu-kumar-u/go-sse/globals"
+	"github.com/muthu-kumar-u/go-sse/handlers"
+	app "github.com/muthu-kumar-u/go-sse/handlers/data"
+	"github.com/muthu-kumar-u/go-sse/middleware"
+	"github.com/muthu-kumar-u/go-sse/utils"
 )
 
-var ginApp *gin.Engine
-var ginLambda *ginadapter.GinLambdaV2
-var streamHandler  *handlers.StreamHandler
-
-// func mainHandler(ctx context.Context, req events.LambdaFunctionURLRequest) (events.LambdaFunctionURLStreamingResponse, error) {
-// 	var res events.LambdaFunctionURLStreamingResponse
-// 	var err error
-
-// 	switch {
-// 	case req.RequestContext.HTTP.Method == http.MethodGet && strings.HasPrefix(req.RawPath, "/api/v1/facelog"):
-// 		res, err = streamHandler.FaceLogStreamLambda(ctx, req)
-
-// 	case req.RequestContext.HTTP.Method == http.MethodPost && strings.HasPrefix(req.RawPath, "/api/v1/facelog/upload"):
-// 		res, err = streamHandler.LogUserFaceLambda(ctx, req)
-
-// 	default:
-// 		res, err = stream.SSEErrorStream(http.StatusNotFound, "not found")
-// 	}
-
-// 	ct := res.Headers["Content-Type"]
-// 	if ct == "" {
-// 		ct = "(none set)"
-// 	}
-// 	fmt.Printf("🔄 Final Response Content-Type: %s\n", ct)
-
-// 	return res, err
-// }
-
-func lambdaHandler(ctx context.Context, req events.LambdaFunctionURLRequest) (events.LambdaFunctionURLStreamingResponse, error) {
-    if ginLambda == nil {
-        ginLambda = ginadapter.NewV2(ginApp)
-    }
-
-    // Convert Lambda URL request to APIGateway request
-    apiReq := events.APIGatewayV2HTTPRequest{
-        Version:               "2.0",
-        RouteKey:              "",
-        RawPath:               req.RawPath,
-        RawQueryString:        req.RawQueryString,
-        Cookies:               req.Cookies,
-        Headers:               req.Headers,
-        QueryStringParameters: req.QueryStringParameters,
-        RequestContext: events.APIGatewayV2HTTPRequestContext{
-            HTTP: events.APIGatewayV2HTTPRequestContextHTTPDescription{
-                Method: req.RequestContext.HTTP.Method,
-                Path:   req.RawPath,
-            },
-            DomainName: req.RequestContext.DomainName,
-        },
-        Body:            req.Body,
-        IsBase64Encoded: req.IsBase64Encoded,
-    }
-
-    resp, err := ginLambda.ProxyWithContext(ctx, apiReq)
-    if err != nil {
-        return events.LambdaFunctionURLStreamingResponse{}, err
-    }
-
-
-	 // 🔍 Log the response content
-    fmt.Println("=== Lambda Response ===")
-    fmt.Printf("Status Code: %d\n", resp.StatusCode)
-    fmt.Printf("Content-Type: %s\n", resp.Headers["Content-Type"])
-    fmt.Printf("Body:\n%s\n", resp.Body)
-
-    return events.LambdaFunctionURLStreamingResponse{
-        StatusCode:        resp.StatusCode,
-        Headers:           resp.Headers,
-        Body:              strings.NewReader(resp.Body),
-        Cookies:           resp.Cookies,
-    }, nil
-}
+var streamHandler *handlers.StreamHandler
 
 func Init() error {
 	flag.Parse()
@@ -110,6 +38,30 @@ func Init() error {
 	return nil
 }
 
+func lambdaHandler(ctx context.Context, req events.LambdaFunctionURLRequest) (*events.LambdaFunctionURLStreamingResponse, error) {
+	switch {
+	case req.RequestContext.HTTP.Method == http.MethodPost && strings.HasPrefix(req.RawPath, "/api/v1/facelog/upload"):
+		return streamHandler.LogUserFaceLambda(ctx, req)
+		
+	case req.RequestContext.HTTP.Method == http.MethodOptions :
+		return &events.LambdaFunctionURLStreamingResponse{
+			StatusCode: http.StatusOK,
+			Headers: map[string]string{
+				"Access-Control-Allow-Origin":  "*",
+				"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+				"Access-Control-Allow-Headers": "Content-Type, Authorization",
+			},
+			Body: strings.NewReader(""),
+		}, nil
+	
+	default:
+		return &events.LambdaFunctionURLStreamingResponse{
+			StatusCode: http.StatusNotFound,
+			Body:       strings.NewReader("Not found"),
+		}, nil
+	}
+}
+
 func main() {
 	if err := Init(); err != nil {
 		log.Fatalf("Initialization error: %v", err)
@@ -118,33 +70,28 @@ func main() {
 
 	handlers := app.LoadAppHandlers()
 	streamHandler = handlers.StreamHandler
-
-	// Initialize Gin
-	ginApp = gin.New()
-	
-	// Middleware
-	ginApp.Use(gin.Logger(), gin.Recovery(), utils.GetCorsConfig())
-
-	version := os.Getenv("APP_VERSION")
-	port := os.Getenv("APP_PORT")
-	production := os.Getenv("PRODUCTION") == "true"
-
-	api := ginApp.Group("/api/" + version)
-	{
-		api.GET("/facelog", middleware.AuthMiddleware(handlers.StreamHandler.UserService), handlers.StreamHandler.FaceLogStream)
-		api.POST("/facelog/upload", middleware.AuthMiddleware(handlers.StreamHandler.UserService), handlers.StreamHandler.LogUserFace)
-	}
-
-	// 404 handler
-	ginApp.NoRoute(middleware.PathNotFound())
-
 	globals.Stream = stream.NewStreamHub()
 
+	production := os.Getenv("PRODUCTION") == "true"
 	if production {
 		log.Println("Running as Lambda function...")
 		lambda.Start(lambdaHandler)
 	} else {
+		port := os.Getenv("APP_PORT")
 		log.Printf("Starting local server on :%s\n", port)
+		
+		// Local Gin setup
+		ginApp := gin.New()
+		ginApp.Use(gin.Logger(), gin.Recovery(), utils.GetCorsConfig())
+		
+		version := os.Getenv("APP_VERSION")
+		api := ginApp.Group("/api/" + version)
+		{
+			api.GET("/facelog", middleware.AuthMiddleware(handlers.StreamHandler.UserService), handlers.StreamHandler.FaceLogStream)
+			api.POST("/facelog/upload", middleware.AuthMiddleware(handlers.StreamHandler.UserService), handlers.StreamHandler.LogUserFace)
+		}
+		ginApp.NoRoute(middleware.PathNotFound())
+		
 		log.Fatal(ginApp.Run(":" + port))
 	}
 }

@@ -5,7 +5,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/nelsonin-research-org/clenz-stream/globals"
+	"github.com/muthu-kumar-u/go-sse/globals"
 )
 
 func AWSSessionConfigure() {

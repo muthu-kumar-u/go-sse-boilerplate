@@ -2,8 +2,8 @@ package globals
 
 import (
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/nelsonin-research-org/clenz-stream/events/stream"
-	appschema "github.com/nelsonin-research-org/clenz-stream/models"
+	"github.com/muthu-kumar-u/go-sse/events/stream"
+	appschema "github.com/muthu-kumar-u/go-sse/models"
 )
 
 var AWSSession *session.Session

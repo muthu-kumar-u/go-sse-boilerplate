@@ -7,9 +7,9 @@ import (
 	"log"
 	"net/http"
 
-	constants "github.com/nelsonin-research-org/clenz-stream/const"
-	"github.com/nelsonin-research-org/clenz-stream/globals"
-	appschema "github.com/nelsonin-research-org/clenz-stream/models"
+	constants "github.com/muthu-kumar-u/go-sse/const"
+	"github.com/muthu-kumar-u/go-sse/globals"
+	appschema "github.com/muthu-kumar-u/go-sse/models"
 )
 
 type UserController interface {

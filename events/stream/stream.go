@@ -2,119 +2,142 @@ package stream
 
 import (
 	"context"
+	"log"
 	"sync"
+	"time"
 )
 
 type StreamHub struct {
 	mu      sync.RWMutex
-	streams map[string][]chan []byte
+	streams map[string]*Stream
+	timers  map[string]*time.Timer
+}
+
+type Stream struct {
+	subscribers map[chan []byte]struct{}
 }
 
 func NewStreamHub() *StreamHub {
 	return &StreamHub{
-		streams: make(map[string][]chan []byte),
+		streams: make(map[string]*Stream),
+		timers:  make(map[string]*time.Timer),
 	}
 }
 
-// Publish sends data to all subscribers of a stream.
-// Returns true if at least one subscriber received the message.
-func (s *StreamHub) Publish(stream string, data []byte) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	subs, exists := s.streams[stream]
-	if !exists {
-		return false
-	}
-
-	// Create a copy of the data to prevent race conditions
-	msg := make([]byte, len(data))
-	copy(msg, data)
-
-	sent := false
-	for _, ch := range subs {
-		select {
-		case ch <- msg:
-			sent = true
-		default:
-			// Skip blocked channels to prevent publisher blocking
-		}
-	}
-	return sent
-}
-
-// Subscribe creates a new subscription to the specified stream.
-// The subscription will be automatically closed when the context is cancelled.
-func (s *StreamHub) Subscribe(ctx context.Context, stream string) (<-chan []byte, error) {
+// Subscribe to a stream
+func (b *StreamHub) Subscribe(ctx context.Context, streamID string) (chan []byte, error) {
 	ch := make(chan []byte, 10)
 
-	s.mu.Lock()
-	s.streams[stream] = append(s.streams[stream], ch)
-	s.mu.Unlock()
+	b.mu.Lock()
+	stream, exists := b.streams[streamID]
+	if !exists {
+		stream = &Stream{
+			subscribers: make(map[chan []byte]struct{}),
+		}
+		b.streams[streamID] = stream
+	}
+	stream.subscribers[ch] = struct{}{}
 
-	// Setup automatic unsubscription when context is done
-	go func() {
-		<-ctx.Done()
-		s.Unsubscribe(stream, ch)
-	}()
+	// Cancel pending deletion if stream is re-used
+	if timer, exists := b.timers[streamID]; exists {
+		timer.Stop()
+		delete(b.timers, streamID)
+	}
+	b.mu.Unlock()
 
+	log.Printf("[📥] Subscribed to stream: %s", streamID)
 	return ch, nil
 }
 
-// Unsubscribe removes a specific channel from a stream's subscribers
-// and cleans up the channel. Safe to call multiple times.
-func (s *StreamHub) Unsubscribe(stream string, ch chan []byte) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// Publish a message to all subscribers of a stream
+func (b *StreamHub) Publish(streamID string, data []byte) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
 
-	subs, exists := s.streams[stream]
+	stream, exists := b.streams[streamID]
 	if !exists {
 		return
 	}
 
-	for i, sub := range subs {
-		if sub == ch {
-			// Remove the channel from the slice
-			s.streams[stream] = append(subs[:i], subs[i+1:]...)
-			
-			// Close the channel safely
-			select {
-			case _, ok := <-ch:
-				if ok {
-					close(ch)
-				}
-			default:
-				close(ch)
-			}
-			
-			// Clean up empty streams
-			if len(s.streams[stream]) == 0 {
-				delete(s.streams, stream)
-			}
-			return
+	for ch := range stream.subscribers {
+		select {
+		case ch <- data:
+		default:
+			// Drop if buffer is full
 		}
 	}
 }
 
-// CloseStream closes all channels for a stream and removes it
-func (s *StreamHub) CloseStream(stream string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// Unsubscribe a channel from a stream
+func (b *StreamHub) Unsubscribe(streamID string, target chan []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-	subs, exists := s.streams[stream]
+	stream, exists := b.streams[streamID]
 	if !exists {
 		return
 	}
 
-	for _, ch := range subs {
-		close(ch)
+	if _, ok := stream.subscribers[target]; ok {
+		close(target)
+		delete(stream.subscribers, target)
 	}
-	delete(s.streams, stream)
+
+	// Clean up stream if no subscribers remain
+	if len(stream.subscribers) == 0 {
+		b.timers[streamID] = time.AfterFunc(2*time.Minute, func() {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			delete(b.streams, streamID)
+			delete(b.timers, streamID)
+			log.Printf("[🗑️] Deleted inactive stream: %s", streamID)
+		})
+	}
 }
 
-// SubscriberCount returns the number of active subscribers for a stream
-func (s *StreamHub) SubscriberCount(stream string) int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.streams[stream])
+// ListStreams returns all currently active stream IDs
+func (b *StreamHub) ListStreams() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	ids := make([]string, 0, len(b.streams))
+	for streamID := range b.streams {
+		ids = append(ids, streamID)
+	}
+	return ids
+}
+
+// Exists checks if a stream exists
+func (b *StreamHub) Exists(streamID string) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	_, ok := b.streams[streamID]
+	return ok
+}
+
+// CreateTemporaryStream creates a stream with automatic expiration
+func (b *StreamHub) CreateTemporaryStream(streamID string, ttl time.Duration) {
+	b.mu.Lock()
+	if _, exists := b.streams[streamID]; exists {
+		b.mu.Unlock()
+		log.Printf("[ℹ️] Stream %s already exists, skipping creation", streamID)
+		return
+	}
+
+	b.streams[streamID] = &Stream{
+		subscribers: make(map[chan []byte]struct{}),
+	}
+	b.mu.Unlock()
+
+	log.Printf("[🆕] Created temporary stream: %s (expires in %s)", streamID, ttl)
+
+	b.timers[streamID] = time.AfterFunc(ttl, func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if _, exists := b.streams[streamID]; exists {
+			delete(b.streams, streamID)
+			delete(b.timers, streamID)
+			log.Printf("[🗑️] Automatically deleted expired stream: %s", streamID)
+		}
+	})
 }

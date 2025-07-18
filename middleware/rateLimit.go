@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/nelsonin-research-org/clenz-stream/globals"
-	"github.com/nelsonin-research-org/clenz-stream/message"
-	appschema "github.com/nelsonin-research-org/clenz-stream/models"
+	"github.com/muthu-kumar-u/go-sse/globals"
+	"github.com/muthu-kumar-u/go-sse/message"
+	appschema "github.com/muthu-kumar-u/go-sse/models"
 )
 
 // RateLimitMiddleware returns a Gin middleware function that rate limits based on IP and endpoint

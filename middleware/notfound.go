@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/nelsonin-research-org/clenz-stream/message"
+	"github.com/muthu-kumar-u/go-sse/message"
 )
 
 func PathNotFound() gin.HandlerFunc {
